@@ -1,0 +1,102 @@
+version: "3"
+dotenv: [".env"]
+
+tasks:
+  #
+  # init:
+  #
+  build-protoc:
+    cmds:
+      - docker build --file docker/dockerfiles/protoc.Dockerfile --tag protoc .
+  pull:
+    cmds:
+      - docker pull bufbuild/buf:1.28.1
+      - docker pull golang:1.21
+      - docker pull postgres:16.1
+      - task: build-protoc
+    status:
+      # (ref.) [How to check if a Docker image with a specific tag exist locally?](https://stackoverflow.com/a/33061675)
+      - docker inspect bufbuild/buf:1.28.1
+      - docker inspect golang:1.21
+      - docker inspect postgres:16.1
+
+  #
+  # developing:
+  #
+  watch:
+    cmds:
+      - docker compose watch --no-up
+  up:
+    cmds:
+      - docker compose up --build --remove-orphans
+
+  #
+  # deploying:
+  #
+  deploy:
+    cmds:
+      - docker compose up --build --detach
+
+  #
+  # code generation:
+  #
+  protoc:
+    internal: true
+    cmds:
+      # (ref.) [Removing leading dots from find command output when used with -exec echo {} option](https://unix.stackexchange.com/a/331710)
+      # (ref.) [How to run docker container as current user & group](https://techoverflow.net/2019/06/26/how-to-run-docker-container-as-current-user-group/)
+      # (ref.) [Solving protoc-gen-go: unable to determine Go import path problem by adding a "M" argument](https://stackoverflow.com/questions/72107940/solving-protoc-gen-go-unable-to-determine-go-import-path-problem-by-adding-a-m)
+      - |
+        for file in $(find ./src -name '*.proto' -printf '%P\n'); do
+          dir="$(dirname $file)"
+          filename="$(basename $file)"
+
+          docker run \
+          --rm \
+          --user "$(id -u):$(id -g)" \
+          --volume "{{.ROOT_DIR}}/src/$dir:/workdir" \
+          --workdir /workdir \
+          protoc \
+          --go_out=. \
+          --go_opt=paths=source_relative,M${filename}=source.local/"$dir" \
+          --go-grpc_out=. \
+          --go-grpc_opt=paths=source_relative,M${filename}=source.local/"$dir" \
+          "$filename"
+        done
+  go-tidy:
+    internal: true
+    cmds:
+      - |
+        modfiles=$(find ./src -name 'go.mod' -printf '%P\n')
+
+        for modfile in ${modfiles[@]}; do
+          pushd "src/$(dirname $modfile)" >/dev/null 2>/dev/null
+          for modfile2 in ${modfiles[@]}; do
+            go mod edit -replace source.local/"$(dirname $modfile2)"=../"$(dirname $modfile2)"
+          done
+          echo "running go mod tidy in $PWD ..."
+          go mod tidy
+          popd >/dev/null 2>/dev/null
+        done
+  tidy:
+    cmds:
+      - task: protoc
+      - task: go-tidy
+
+  #
+  # debugging:
+  #
+  db:
+    cmds:
+      - docker run -it --rm
+        --network example-web-app_default
+        postgres psql
+        --host=$POSTGRES_CONTAINER_NAME
+        --dbname=$POSTGRES_DB
+        --username=$POSTGRES_USER
+  logs:
+    cmds:
+      - docker compose logs {{.CLI_ARGS}}
+  buf-lint:
+    cmds:
+      - docker run --rm -it --volume "{{.ROOT_DIR}}:/workspace" --workdir /workspace bufbuild/buf:1.28.1 lint

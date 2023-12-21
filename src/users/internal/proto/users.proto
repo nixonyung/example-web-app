@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+service UsersService {
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse) {}
+  rpc FindUsers(FindUsersRequest) returns (FindUsersResponse) {}
+  rpc AddBalance(AddBalanceRequest) returns (AddBalanceResponse) {}
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse) {}
+}
+
+message CreateUserRequest {
+  string username = 1;
+  string password = 2;
+}
+message CreateUserResponse {
+  string id = 1;
+}
+
+message UserView {
+  string id = 1;
+  string username = 2;
+  string role = 3;
+  double balance = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+message FindUsersRequest {
+  optional string id = 1;
+  optional string username = 2;
+}
+message FindUsersResponse {
+  repeated UserView users = 1;
+}
+
+message DeleteUserRequest {
+  string id = 1;
+  bool isTesting = 2;
+}
+message DeleteUserResponse {}
+
+message AddBalanceRequest {
+  string user_id = 1;
+  double amount = 2;
+}
+message AddBalanceResponse {}
