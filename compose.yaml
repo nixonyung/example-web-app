@@ -1,0 +1,191 @@
+# (ref.) [Don't Repeat Yourself with Anchors, Aliases and Extensions in Docker Compose Files](https://medium.com/@kinghuang/docker-compose-anchors-aliases-extensions-a1e4105d70bd)
+# (TODO) [[BUG] start_period doesn't respect successful healthcheck results during the period](https://github.com/docker/compose/issues/11131)
+#   e.g.
+#     start_period: 10s
+#     start_interval: 1s
+#     interval: 10s
+
+#
+# templates:
+#
+
+x-build:
+  build: &build
+    context: .
+    dockerfile: docker/dockerfiles/service.Dockerfile
+
+x-service-configs: &service-configs
+  environment:
+    # (ref.) [Setting timezone globally in golang](https://stackoverflow.com/questions/54363451/setting-timezone-globally-in-golang)
+    # IMPORTANT: add `import _ "time/tzdata"` at each service's main.go
+    TZ: $TIMEZONE
+
+    POSTGRES_DB: $POSTGRES_DB
+    POSTGRES_USER: $POSTGRES_USER
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    API_GATEWAY_CONTAINER_PORT: $API_GATEWAY_CONTAINER_PORT
+    USERS_CONTAINER_PORT: $USERS_CONTAINER_PORT
+  secrets:
+    - postgres-password
+  depends_on:
+    db_init:
+      condition: service_completed_successfully
+    fluent-bit:
+      condition: service_healthy
+  logging:
+    driver: fluentd
+    options:
+      fluentd-address: 127.0.0.1:24224 # somehow cannot use container name, need to use host
+
+#
+# specs:
+#
+
+secrets:
+  postgres-password:
+    file: docker/secrets/postgres-password.txt
+
+volumes:
+  postgres_volume:
+  elasticsearch_volume:
+
+services:
+  # (ref.) [A beginner's guide to running Elasticsearch with Docker and Docker Compose - Run Elasticsearch with Docker Compose](https://geshan.com.np/blog/2023/06/elasticsearch-docker/#run-elasticsearch-with-docker-compose)
+  elasticsearch:
+    image: elasticsearch:8.11.3
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    # (ref.) [How to use persistent storage for elasticsearch in docker](https://ervikrant06.github.io/elk/ELK-docker-compose/)
+    volumes:
+      - elasticsearch_volume:/usr/share/elasticsearch/data
+    # (ref.) [Elasticsearch - Cluster health API](https://www.elastic.co/guide/en/elasticsearch/reference/current/cluster-health.html)
+    healthcheck:
+      test: "curl http://localhost:9200/_cluster/health"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: always
+    attach: false # don't collect logs
+
+  # (ref.) [Defining the Fluent Bit service with Docker Compose](https://betterstack.com/community/guides/logging/fluent-bit-explained/#defining-the-fluent-bit-service-with-docker-compose)
+  fluent-bit:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/fluent-bit.Dockerfile
+    volumes:
+      - ./docker/fluent-bit:/fluent-bit/etc
+    ports:
+      - 24224:24224 # listen and forward docker logs
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    # (ref.) [Health Check for Fluent Bit](https://docs.fluentbit.io/manual/administration/monitoring#health-check-for-fluent-bit)
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:2020/api/v1/health"] # need Exec form as there is no shell
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: always
+
+  kibana:
+    image: kibana:8.11.3
+    ports:
+      - 5601:5601
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    attach: false # don't collect logs
+
+  postgres:
+    <<: *service-configs
+    image: postgres:16.1
+    # (ref.) [How to persist data in a dockerized postgres database using volumes](https://stackoverflow.com/questions/41637505/how-to-persist-data-in-a-dockerized-postgres-database-using-volumes)
+    volumes:
+      - postgres_volume:/var/lib/postgresql/data
+    depends_on:
+      fluent-bit:
+        condition: service_healthy
+    # (ref.) [docker-compose-healthcheck](https://github.com/peter-evans/docker-compose-healthcheck)
+    healthcheck:
+      test: "pg_isready -U app"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: always
+
+  db_init:
+    <<: *service-configs
+    build:
+      <<: *build
+      args:
+        package: common
+        cmd: ./cmd/db_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: rebuild
+          path: src/db
+        - action: rebuild
+          path: src/common
+
+  users:
+    <<: *service-configs
+    build:
+      <<: *build
+      args:
+        package: users
+    healthcheck:
+      test: "grpcurl -plaintext localhost:$USERS_CONTAINER_PORT grpc.health.v1.Health.Check" # need Shell form to use env in the container
+      interval: 3s
+      timeout: 10s
+      retries: 3
+    develop:
+      watch:
+        - action: rebuild
+          path: src/users
+        - action: rebuild
+          path: src/common
+
+  api-gateway:
+    <<: *service-configs
+    build:
+      <<: *build
+      args:
+        package: api-gateway
+    ports:
+      - $API_GATEWAY_EXPOSED_PORT:$API_GATEWAY_CONTAINER_PORT
+    # (ref.) [fiber - docker app with prefork fails](https://github.com/gofiber/fiber/issues/1036#issuecomment-738147598)
+    pid: host
+    depends_on:
+      users:
+        condition: service_healthy
+    healthcheck:
+      test: 'curl --fail --silent --header "X-Health-Check: 1" --head http://localhost:$API_GATEWAY_CONTAINER_PORT'
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    develop:
+      watch:
+        - action: rebuild
+          path: src/api-gateway
+        - action: rebuild
+          path: src/common
+
+  test:
+    <<: *service-configs
+    build:
+      <<: *build
+      args:
+        package: test
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: rebuild
+          path: src/test
+        - action: rebuild
+          path: src/common

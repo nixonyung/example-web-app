@@ -1,0 +1,148 @@
+version: "3"
+dotenv: [".env"]
+
+tasks:
+  #
+  # init:
+  #
+  # (ref.) [How to check if a Docker image with a specific tag exist locally?](https://stackoverflow.com/a/33061675)
+  #
+  pull-buf:
+    internal: true
+    cmds:
+      - docker pull bufbuild/buf:1.28.1
+    status:
+      - docker inspect bufbuild/buf:1.28.1
+  pull-curl:
+    internal: true
+    cmds:
+      - docker pull tarampampam/curl
+    status:
+      - docker inspect tarampampam/curl
+  pull-elasticsearch:
+    internal: true
+    cmds:
+      - docker pull elasticsearch:8.11.3
+    status:
+      - docker inspect elasticsearch:8.11.3
+  pull-fluent-bit:
+    internal: true
+    cmds:
+      - docker pull fluent/fluent-bit:2.2
+    status:
+      - docker inspect fluent/fluent-bit:2.2
+  pull-golang:
+    internal: true
+    cmds:
+      - docker pull golang:1.21
+    status:
+      - docker inspect golang:1.21
+  pull-kibana:
+    internal: true
+    cmds:
+      - docker pull kibana:8.11.3
+    status:
+      - docker inspect kibana:8.11.3
+  pull-postgres:
+    internal: true
+    cmds:
+      - docker pull postgres:16.1
+    status:
+      - docker inspect postgres:16.1
+  build-protoc:
+    internal: true
+    cmds:
+      - docker build --file docker/dockerfiles/protoc.Dockerfile --tag protoc .
+    sources:
+      - docker/dockerfiles/protoc.Dockerfile
+  pull:
+    cmds:
+      - task: pull-buf
+      - task: pull-curl
+      - task: pull-elasticsearch
+      - task: pull-fluent-bit
+      - task: pull-golang
+      - task: pull-kibana
+      - task: pull-postgres
+      - task: build-protoc
+
+  #
+  # developing:
+  #
+  watch:
+    cmds:
+      - docker compose watch --no-up
+  up:
+    cmds:
+      - docker compose up --build --remove-orphans
+
+  #
+  # deploying:
+  #
+  deploy:
+    cmds:
+      - docker compose up --build --detach
+
+  #
+  # code generation:
+  #
+  protoc:
+    internal: true
+    cmds:
+      # (ref.) [Removing leading dots from find command output when used with -exec echo {} option](https://unix.stackexchange.com/a/331710)
+      # (ref.) [How to run docker container as current user & group](https://techoverflow.net/2019/06/26/how-to-run-docker-container-as-current-user-group/)
+      # (ref.) [Solving protoc-gen-go: unable to determine Go import path problem by adding a "M" argument](https://stackoverflow.com/questions/72107940/solving-protoc-gen-go-unable-to-determine-go-import-path-problem-by-adding-a-m)
+      - |
+        for file in $(find ./src -name '*.proto' -printf '%P\n'); do
+          dir="$(dirname $file)"
+          filename="$(basename $file)"
+
+          docker run \
+          --rm \
+          --user "$(id -u):$(id -g)" \
+          --volume "{{.ROOT_DIR}}/src/$dir:/workdir" \
+          --workdir /workdir \
+          protoc \
+          --go_out=. \
+          --go_opt=paths=source_relative,M${filename}=source.local/"$dir" \
+          --go-grpc_out=. \
+          --go-grpc_opt=paths=source_relative,M${filename}=source.local/"$dir" \
+          "$filename"
+        done
+  go-tidy:
+    internal: true
+    cmds:
+      - |
+        modfiles=$(find ./src -name 'go.mod' -printf '%P\n')
+
+        for modfile in ${modfiles[@]}; do
+          pushd "src/$(dirname $modfile)" >/dev/null 2>/dev/null
+          for modfile2 in ${modfiles[@]}; do
+            go mod edit -replace source.local/"$(dirname $modfile2)"=../"$(dirname $modfile2)"
+          done
+          echo "running go mod tidy in $PWD ..."
+          go mod tidy
+          popd >/dev/null 2>/dev/null
+        done
+  tidy:
+    cmds:
+      - task: protoc
+      - task: go-tidy
+
+  #
+  # debugging:
+  #
+  db:
+    cmds:
+      - docker run -it --rm
+        --network example-web-app_default
+        postgres psql
+        --host=postgres
+        --dbname=$POSTGRES_DB
+        --username=$POSTGRES_USER
+  kibana:
+    cmds:
+      - xdg-open "http://localhost:5601/app/discover#/?_g=(filters:!(),refreshInterval:(pause:!t,value:60000),time:(from:now-1d,to:now))&_a=(columns:!(type,container_name,loc,func,message,log),filters:!(),grid:(columns:('@timestamp':(width:212),container_name:(width:235),func:(width:453),loc:(width:417),log:(width:550),message:(width:634),type:(width:86))),index:ff6d3bbd-cec3-4930-976a-72a1783b7b3d,interval:auto,query:(language:kuery,query:''),sort:!(!('@timestamp',desc)))"
+  buf-lint:
+    cmds:
+      - docker run --rm -it --volume "{{.ROOT_DIR}}:/workspace" --workdir /workspace bufbuild/buf:1.28.1 lint
